@@ -1,1 +1,2 @@
-aiosqlite
+aiosqlite>=0.20.0,<1.0
+pillowmd>=0.7.0,<1.0
