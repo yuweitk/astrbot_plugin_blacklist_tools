@@ -12,7 +12,7 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.message_session import MessageSession, MessageSesion
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.star_tools import StarTools
-from .utils.text_to_image import text_to_image
+import pillowmd
 from .database import BlacklistDatabase
 
 
@@ -293,56 +293,70 @@ class MyPlugin(Star):
 
             users = await self.db.get_blacklist_users(page, page_size)
 
-            result = "黑名单列表\n"
-            result += "=" * 60 + "\n\n"
-
-            # 自适应列宽：先算每列需要的宽度
-            headers = ["ID", "昵称", "加入时间", "过期时间", "原因"]
-            min_widths = [self._display_len(h) + 2 for h in headers]
-            max_widths = [40, 24, 24, 24, 20]
-            col_widths = list(min_widths)
-
-            # 第一遍扫描：根据内容调整列宽
-            rows_data = []
+            # 构造 Markdown 表格
+            table_rows = ["| ID | 昵称 | 加入时间 | 过期时间 | 原因 |"]
+            table_rows.append("|----|------|----------|----------|------|")
             for user in users:
                 user_id, ban_time, expire_time, reason, nickname = user
                 nick = nickname if nickname else "?"
                 ban_time_str = self._format_datetime(ban_time, check_expire=False)
                 expire_time_str = self._format_datetime(expire_time, check_expire=True)
-                rows_data.append((str(user_id), str(nick), ban_time_str, expire_time_str, str(reason)))
+                reason_str = reason if reason else ""
+                # 转义 Markdown 表格中的竖线
+                user_id_str = str(user_id).replace("|", "\\|")
+                nick_str = str(nick).replace("|", "\\|")
+                reason_str = reason_str.replace("|", "\\|")
+                table_rows.append(
+                    f"| {user_id_str} | {nick_str} | {ban_time_str} | {expire_time_str} | {reason_str} |"
+                )
 
-            for row in rows_data:
-                for i, val in enumerate(row):
-                    w = self._display_len(val) + 2
-                    if w > col_widths[i]:
-                        col_widths[i] = min(w, max_widths[i])
+            md_content = "\n".join(table_rows)
 
-            # 渲染表头
-            sep = "  "
-            header_parts = [f"{h:<{col_widths[i]}}" for i, h in enumerate(headers)]
-            result += sep.join(header_parts) + "\n"
-            total_width = sum(col_widths) + len(sep) * (len(headers) - 1)
-            result += "-" * total_width + "\n"
-
-            # 渲染数据行
-            for row in rows_data:
-                parts = [f"{row[i]:<{col_widths[i]}}" for i in range(len(headers))]
-                result += sep.join(parts) + "\n"
-
-            result += "-" * total_width + "\n"
-            result += f"第 {page}/{total_pages} 页，共 {total_count} 条记录\n"
-            result += f"每页显示 {page_size} 条记录\n"
-
+            # 分页信息
+            page_info = (
+                f"第 {page}/{total_pages} 页 | 共 {total_count} 条记录 | "
+                f"每页 {page_size} 条"
+            )
             if page > 1:
-                result += f"使用 `/black ls {page - 1} {page_size}` 查看上一页\n"
+                page_info += f" | ← `/bl ls {page - 1} {page_size}`"
             if page < total_pages:
-                result += f"使用 `/black ls {page + 1} {page_size}` 查看下一页\n"
+                page_info += f" | `/bl ls {page + 1} {page_size}` →"
 
-            image_data = await text_to_image(result)
-            if image_data:
-                yield event.chain_result([Comp.Image.fromBase64(image_data)])
-            else:
-                yield event.plain_result(result)
+            md_footer = f"\n\n> {page_info}"
+
+            try:
+                # 使用 pillowmd 渲染 Markdown 为图片，自适应宽度
+                style = pillowmd.MdStyle(
+                    name="blacklist",
+                    fontSize=22,
+                    title1FontSize=50,
+                    title2FontSize=40,
+                    title3FontSize=32,
+                    xSizeMax=1200,
+                    formLineDistance=15,
+                    lineDistance=8,
+                    formTextColor=(255, 255, 255),
+                    formUnderpainting=(10, 20, 40, 0),
+                    formTitleUnderpainting=(30, 60, 120, 0),
+                    textColor=(220, 230, 255),
+                    linkColor=(180, 200, 255),
+                )
+                render_result = await pillowmd.MdToImage(
+                    text=md_content + md_footer,
+                    title="黑名单列表",
+                    autoPage=True,
+                    style=style,
+                    showLink=False,
+                )
+                import io, base64
+
+                buf = io.BytesIO()
+                render_result.image.save(buf, format="PNG")
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                yield event.chain_result([Comp.Image.fromBase64(b64)])
+            except Exception as render_err:
+                logger.error(f"pillowmd 渲染失败，回退到文本：{render_err}")
+                yield event.plain_result(md_content + "\n" + page_info)
         except Exception as e:
             logger.error(f"列出黑名单时出错：{e}")
             yield event.plain_result("列出黑名单时出错。")
@@ -446,19 +460,47 @@ class MyPlugin(Star):
             reason_str = reason if reason else "无"
             nick = nickname if nickname else "?"
 
-            result = f"用户 {final_user_id} 的黑名单信息：\n"
-            result += "=" * 40 + "\n"
-            result += f"昵称: {nick}\n"
-            result += f"ID: {final_user_id}\n"
-            result += f"加入时间: {ban_time_str}\n"
-            result += f"过期时间: {expire_time_str}\n"
-            result += f"原因: {reason_str}\n"
+            md_content = (
+            f"## 用户信息\n\n"
+            f"| 项目 | 内容 |\n"
+            f"|---|---|\n"
+            f"| **昵称** | {nick} |\n"
+            f"| **ID** | `{final_user_id}` |\n"
+            f"| **加入时间** | {ban_time_str} |\n"
+            f"| **过期时间** | {expire_time_str} |\n"
+            f"| **原因** | {reason_str} |\n"
+        )
 
-            image_data = await text_to_image(result)
-            if image_data:
-                yield event.chain_result([Comp.Image.fromBase64(image_data)])
-            else:
-                yield event.plain_result(result)
+            try:
+                style = pillowmd.MdStyle(
+                    name="blacklist_info",
+                    fontSize=22,
+                    title1FontSize=40,
+                    title2FontSize=32,
+                    xSizeMax=800,
+                    formLineDistance=12,
+                    lineDistance=6,
+                    formTextColor=(255, 255, 255),
+                    formUnderpainting=(10, 20, 40, 0),
+                    formTitleUnderpainting=(30, 60, 120, 0),
+                    textColor=(220, 230, 255),
+                )
+                render_result = await pillowmd.MdToImage(
+                    text=md_content,
+                    title="黑名单详情",
+                    autoPage=False,
+                    style=style,
+                    showLink=False,
+                )
+                import io, base64
+
+                buf = io.BytesIO()
+                render_result.image.save(buf, format="PNG")
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                yield event.chain_result([Comp.Image.fromBase64(b64)])
+            except Exception as render_err:
+                logger.error(f"pillowmd 渲染失败，回退到文本：{render_err}")
+                yield event.plain_result(md_content)
         except Exception as e:
             logger.error(f"查看用户 {final_user_id} 黑名单信息时出错：{e}")
             yield event.plain_result("查看用户黑名单信息时出错。")
